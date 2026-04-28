@@ -28,66 +28,146 @@
  *
  ******************************************************************************/
 #include <stdio.h>
-#include <time.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
-//#include "sl_system_init.h"
-#include "sl_sleeptimer.h"
-#include "sl_iostream.h"
-#include "sl_iostream_handles.h"
+#include "em_cmu.h"
+#include "em_gpio.h"
+#include "em_usart.h"
 
-// Global offset to store the Unix Epoch baseline
+#include "sl_hal_sysrtc.h"
+
+// SYSRTC runs at 32.768 kHz
+#define RTC_FREQ 32768
+
+// UART buffer size
+#define RX_BUFFER_SIZE 32
+
 static uint32_t unix_epoch_offset = 0;
 
-//Update the internal clock using a Unix timestamp received from the PC.
-void set_rtc_time(uint32_t pc_timestamp) {
-  uint32_t current_ticks = sl_sleeptimer_get_tick_count();
-  uint32_t uptime_seconds;
-  
-  // Convert ticks to seconds (handling frequency scaling automatically)
-  uptime_seconds = sl_sleeptimer_tick_to_ms(current_ticks) / 1000;
+void uart_init(void)
+{
+  CMU_ClockEnable(cmuClock_GPIO, true);
+  CMU_ClockEnable(cmuClock_USART0, true);
 
-  // Calculate the offset between uptime and real-world time
-  unix_epoch_offset = pc_timestamp - uptime_seconds;
+  // Configure pins
+  GPIO_PinModeSet(gpioPortA, 5, gpioModePushPull, 1); // TX
+  GPIO_PinModeSet(gpioPortA, 6, gpioModeInput, 0);    // RX
+  GPIO_PinModeSet(gpioPortA, 0, gpioModePushPull, 1);
+
+  USART_InitAsync_TypeDef init = USART_INITASYNC_DEFAULT;
+  init.baudrate = 115200;
+
+  USART_InitAsync(USART0, &init);
+
+  // Series 2 routing
+  GPIO->USARTROUTE[0].TXROUTE =
+      (gpioPortA << _GPIO_USART_TXROUTE_PORT_SHIFT)
+    | (5 << _GPIO_USART_TXROUTE_PIN_SHIFT);
+
+  GPIO->USARTROUTE[0].RXROUTE =
+      (gpioPortA << _GPIO_USART_RXROUTE_PORT_SHIFT)
+    | (6 << _GPIO_USART_RXROUTE_PIN_SHIFT);
+
+  GPIO->USARTROUTE[0].ROUTEEN =
+      GPIO_USART_ROUTEEN_TXPEN |
+      GPIO_USART_ROUTEEN_RXPEN;
 }
 
-//Gets current time and prints it to the serial console.
-void print_current_time(void) {
-  uint32_t current_ticks = sl_sleeptimer_get_tick_count();
-  uint32_t uptime_seconds;
- uptime_seconds = sl_sleeptimer_tick_to_ms(current_ticks) / 1000;
+void uart_send_string(const char *str)
+{
+  while (*str) {
+    USART_Tx(USART0, *str++);
+  }
+}
 
-  time_t current_time = (time_t)(unix_epoch_offset + uptime_seconds);
+int uart_read_line(char *buffer, int max_len)
+{
+  int i = 0;
+
+  while (i < max_len - 1) {
+    char c = USART_Rx(USART0);
+
+    if (c == '\r' || c == '\n') break;
+
+    buffer[i++] = c;
+  }
+
+  buffer[i] = '\0';
+  return i;
+}
+
+void sysrtc_init(void)
+{
+  CMU_ClockEnable(cmuClock_SYSRTC, true);
+  // Minimal init: many HAL versions auto-configure via slcp
+  // If your SDK requires a struct, tell me and I’ll match it exactly
+  sl_hal_sysrtc_init_t init = SL_HAL_SYSRTC_INIT_DEFAULT;
+    sl_hal_sysrtc_init(&init);
+
+    // Start the counter
+    sl_hal_sysrtc_enable();
+}
+
+void set_rtc_time(uint32_t pc_timestamp)
+{
+  uint32_t rtc_count = SYSRTC0->CNT;
+  uint32_t rtc_seconds = rtc_count / RTC_FREQ;
+
+  unix_epoch_offset = pc_timestamp - rtc_seconds;
+}
+
+void print_current_time(void)
+{
+  uint32_t rtc_count = SYSRTC0->CNT;
+  uint32_t rtc_seconds = rtc_count / RTC_FREQ;
+
+  time_t current_time = (time_t)(unix_epoch_offset + rtc_seconds);
   struct tm *time_info = gmtime(&current_time);
 
-  // Send formatted time back to the computer
-  printf("RTC Time: %04d-%02d-%02d %02d:%02d:%02d UTC\r\n",
-         time_info->tm_year + 1900, time_info->tm_mon + 1, time_info->tm_mday,
-         time_info->tm_hour, time_info->tm_min, time_info->tm_sec);
+  char out[80];
+
+  sprintf(out,
+          "RTC Time: %04d-%02d-%02d %02d:%02d:%02d UTC\r\n",
+          time_info->tm_year + 1900,
+          time_info->tm_mon + 1,
+          time_info->tm_mday,
+          time_info->tm_hour,
+          time_info->tm_min,
+          time_info->tm_sec);
+
+  uart_send_string(out);
 }
 
-int main(void) {
- // sl_system_init();
 
-  char input_buffer[16];
-  size_t bytes_read;
+int main(void)
+{
+  uart_init();
+  sysrtc_init();
 
-  while (1) {
-    // Check for incoming timestamp from PC
-    sl_iostream_read(sl_iostream_vcom_handle, input_buffer, sizeof(input_buffer) - 1, &bytes_read);
-    
-    if (bytes_read > 0) {
-      input_buffer[bytes_read] = '\0';
-      uint32_t received_val = (uint32_t)strtoul(input_buffer, NULL, 10);
-      if (received_val > 0) {
-        set_rtc_time(received_val);
-        printf("Time Synced!\r\n");
+  char buffer[RX_BUFFER_SIZE];
+
+  while (1)
+  {
+    uart_send_string("Enter Unix Timestamp:\r\n");
+
+    int len = uart_read_line(buffer, RX_BUFFER_SIZE);
+
+    if (len > 0)
+    {
+      uint32_t received = (uint32_t)strtoul(buffer, NULL, 10);
+
+      if (received > 0)
+      {
+        set_rtc_time(received);
+        uart_send_string("Time Synced!\r\n");
       }
     }
 
-    //Report time every few seconds
     print_current_time();
-    sl_sleeptimer_delay_millisecond(2000);
+
+    // crude delay loop (replace with timer if needed)
+    for (volatile uint32_t i = 0; i < 5000000; i++);
   }
 }
