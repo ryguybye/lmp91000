@@ -38,7 +38,7 @@
 #include "em_device.h"
 
 #define RTC_FREQ 32768
-#define RX_BUFFER_SIZE 64
+#define RX_BUFFER_SIZE 32
 
 static uint32_t unix_epoch_offset = 0;
 
@@ -49,21 +49,24 @@ void uart_init(void)
   CMU_ClockEnable(cmuClock_GPIO, true);
   CMU_ClockEnable(cmuClock_USART0, true);
 
-  GPIO_PinModeSet(gpioPortA, 5, gpioModePushPull, 1);
-  GPIO_PinModeSet(gpioPortA, 6, gpioModeInput, 0);
+  // Configure pins
+  GPIO_PinModeSet(gpioPortA, 5, gpioModePushPull, 1); // TX
+  GPIO_PinModeSet(gpioPortA, 6, gpioModeInput, 0);    // RX
+  GPIO_PinModeSet(gpioPortA, 0, gpioModePushPull, 1);
 
   USART_InitAsync_TypeDef init = USART_INITASYNC_DEFAULT;
   init.baudrate = 115200;
 
   USART_InitAsync(USART0, &init);
 
+  // Series 2 routing
   GPIO->USARTROUTE[0].TXROUTE =
-      (gpioPortA << _GPIO_USART_TXROUTE_PORT_SHIFT) |
-      (5 << _GPIO_USART_TXROUTE_PIN_SHIFT);
+      (gpioPortA << _GPIO_USART_TXROUTE_PORT_SHIFT)
+    | (5 << _GPIO_USART_TXROUTE_PIN_SHIFT);
 
   GPIO->USARTROUTE[0].RXROUTE =
-      (gpioPortA << _GPIO_USART_RXROUTE_PORT_SHIFT) |
-      (6 << _GPIO_USART_RXROUTE_PIN_SHIFT);
+      (gpioPortA << _GPIO_USART_RXROUTE_PORT_SHIFT)
+    | (6 << _GPIO_USART_RXROUTE_PIN_SHIFT);
 
   GPIO->USARTROUTE[0].ROUTEEN =
       GPIO_USART_ROUTEEN_TXPEN |
@@ -72,17 +75,17 @@ void uart_init(void)
 
 void uart_send_string(const char *str)
 {
-  while (*str) USART_Tx(USART0, *str++);
+  while (*str) {
+    USART_Tx(USART0, *str++);
+  }
 }
 
 int uart_read_line(char *buffer, int max_len)
 {
   int i = 0;
-  char c;
 
-  while (i < max_len - 1)
-  {
-    c = USART_Rx(USART0);
+  while (i < max_len - 1) {
+    char c = USART_Rx(USART0);
 
     if (c == '\r' || c == '\n') break;
 
